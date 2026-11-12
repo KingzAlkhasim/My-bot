@@ -1,0 +1,128 @@
+<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>WA Bot Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
+<style>
+:root{--bg:#0f1419;--card:#1a212b;--tx:#e7ecf1;--mut:#8b98a5;--ac:#25d366;--bd:#2a3440}
+@media(prefers-color-scheme:light){:root{--bg:#f4f6f8;--card:#fff;--tx:#15202b;--mut:#5b6b7a;--bd:#dde3e9}}
+*{box-sizing:border-box}body{margin:0;font:15px system-ui,sans-serif;background:var(--bg);color:var(--tx)}
+header{display:flex;gap:12px;align-items:center;padding:12px 16px;border-bottom:1px solid var(--bd)}header b{flex:1}
+.grid{display:grid;gap:14px;padding:14px;max-width:900px;margin:auto}
+section,.card{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:14px}
+.card{max-width:340px;margin:60px auto}h3,h2{margin:0 0 10px}
+select,input[type=datetime-local],input[type=text],input[type=email],input[type=password],input[type=number],textarea{width:100%;padding:9px;margin:4px 0 10px;background:var(--bg);color:var(--tx);border:1px solid var(--bd);border-radius:8px;font:inherit}
+button{background:var(--ac);color:#000;border:0;border-radius:8px;padding:9px 14px;font-weight:600}
+label{display:block;color:var(--mut);font-size:13px}.row{display:flex;gap:10px;align-items:center}
+.g{border-top:1px solid var(--bd);padding:10px 0}.pill{font-size:12px;padding:2px 8px;border-radius:99px;background:var(--bd)}
+.ev{border-top:1px solid var(--bd);padding:8px 0;font-size:13px}.ev small{color:var(--mut)}
+</style></head><body><div id="app"></div>
+<script>
+const SUPABASE_URL = 'https://leiujcgrhorocpomgcpi.supabase.co', SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxlaXVqY2dyaG9yb2Nwb21nY3BpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODI1Njg3OTgsImV4cCI6MjA5ODE0NDc5OH0.mSg3e_oG6MxZu9DPg2kefVUhkKF0CgMk2VUv1TaYei0'
+const db = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
+const app = document.getElementById('app'); let G = [], S = {}
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))
+const v = id => document.getElementById(id)
+
+async function init() { const { data } = await db.auth.getSession(); data.session ? main() : login() }
+function login() {
+  app.innerHTML = `<div class="card"><h2>Sign in</h2><input id="le" type="email" placeholder="Email"><input id="lp" type="password" placeholder="Password"><button onclick="doLogin()">Sign in</button><p id="lm"></p></div>`
+}
+async function doLogin() {
+  const { error } = await db.auth.signInWithPassword({ email: v('le').value, password: v('lp').value })
+  error ? v('lm').textContent = error.message : main()
+}
+function main() {
+  app.innerHTML = `<header><b>WhatsApp Bot</b><span id="st" class="pill"></span><button onclick="db.auth.signOut().then(login)">Logout</button></header>
+  <div class="grid"><section><h3>Live alerts</h3><div id="ev"></div></section><section><h3>Away mode</h3><div id="away"></div></section><section><h3>Groups</h3><div id="groups"></div></section>
+  <section><h3>Group summaries</h3><div id="sum"></div></section>
+  <section><h3>Scheduled messages</h3><div id="sched"></div></section>
+  <section><h3>Analytics</h3><div id="stats"></div></section></div>`
+  loadSt(); loadEv(); loadAway()
+  loadGroups().then(() => { loadSum(); loadSched(); loadStats() }); setInterval(loadSum, 10000)
+  db.channel('live').on('postgres_changes', { event: '*', schema: 'public', table: 'events' }, loadEv)
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'status' }, loadSt).subscribe()
+}
+async function loadSt() { const { data } = await db.from('status').select('state').eq('id', 1).single(); v('st').textContent = data?.state || '?' }
+async function loadEv() {
+  const { data } = await db.from('events').select('*').order('id', { ascending: false }).limit(30)
+  v('ev').innerHTML = (data || []).map(e => `<div class="ev"><b>${esc(e.type)}</b> ${esc(e.detail)}<br><small>${new Date(e.created_at).toLocaleString()}</small></div>`).join('') || 'No alerts yet.'
+}
+async function loadAway() {
+  const { data } = await db.from('settings').select('*').eq('id', 1).single(); S = data || {}
+  v('away').innerHTML = `<label class="row"><input type="checkbox" id="am" ${S.away_mode ? 'checked' : ''}> Away mode on</label>
+  <label>Away message</label><textarea id="amsg" rows="3">${esc(S.away_message)}</textarea>
+  <label class="row"><input type="checkbox" id="ai" ${S.use_ai ? 'checked' : ''}> Use AI replies (needs Gemini key on the bot)</label>
+  <label>AI style (e.g. casual, short, Hausa/English mix)</label><input type="text" id="ast" value="${esc(S.ai_style)}">
+  <label>Never reply to (numbers, comma separated, e.g. 2348012345678)</label><input type="text" id="abl" value="${esc(S.blacklist)}">
+  <label>Only reply to (optional, leave empty for everyone)</label><input type="text" id="aon" value="${esc(S.allow_only)}">
+  <button onclick="saveAway()">Save</button>`
+}
+async function saveAway() {
+  await db.from('settings').update({ away_mode: v('am').checked, away_message: v('amsg').value, use_ai: v('ai').checked,
+    ai_style: v('ast').value, blacklist: v('abl').value, allow_only: v('aon').value }).eq('id', 1); alert('Saved')
+}
+async function loadGroups() {
+  const { data } = await db.from('groups').select('*').order('name'); G = data || []
+  v('groups').innerHTML = G.map((g, i) => `<div class="g"><div class="row"><b style="flex:1">${esc(g.name)}</b>
+    <span class="pill">${g.bot_is_admin ? 'bot is admin' : 'bot not admin'}</span></div>
+    <label class="row"><input type="checkbox" id="m${i}" ${g.managed ? 'checked' : ''}> Manage this group</label>
+    <label>Welcome message ({name} = new member)</label><textarea id="w${i}" rows="2">${esc(g.welcome)}</textarea>
+    <label class="row"><input type="checkbox" id="l${i}" ${g.anti_link ? 'checked' : ''}> Block links</label>
+    <div class="row"><div><label>Spam limit (msgs/10s)</label><input type="number" id="s${i}" value="${g.spam_limit}"></div>
+    <div><label>Warns before removal</label><input type="number" id="p${i}" value="${g.warn_limit}"></div></div>
+    <label>Alert keywords (comma separated)</label><input type="text" id="k${i}" value="${esc(g.keywords)}">
+    <button onclick="saveG(${i})">Save group</button></div>`).join('') || 'No groups yet. Start the bot first.'
+}
+async function saveG(i) {
+  await db.from('groups').update({ managed: v('m' + i).checked, welcome: v('w' + i).value, anti_link: v('l' + i).checked,
+    spam_limit: +v('s' + i).value, warn_limit: +v('p' + i).value, keywords: v('k' + i).value }).eq('id', G[i].id); alert('Saved')
+}
+const groupOpts = () => G.map(g => `<option value="${esc(g.id)}">${esc(g.name)}</option>`).join('')
+
+async function loadSum() {
+  if (!v('sum')) return
+  if (!v('sumg')) v('sum').innerHTML = `<select id="sumg">${groupOpts()}</select><select id="sumh"><option value="6">Last 6 hours</option><option value="24" selected>Last 24 hours</option><option value="72">Last 3 days</option></select><button onclick="reqSum()">Summarize</button><div id="sumlist"></div>`
+  const { data } = await db.from('summary_jobs').select('*').order('id', { ascending: false }).limit(8)
+  v('sumlist').innerHTML = (data || []).map(j => `<div class="ev"><b>${esc(j.group_name)}</b> <small>${esc(j.status)} · ${j.hours}h</small><div style="white-space:pre-wrap">${esc(j.result || 'Working on it...')}</div></div>`).join('')
+}
+async function reqSum() {
+  const id = v('sumg').value; if (!id) return
+  await db.from('summary_jobs').insert({ group_jid: id, group_name: G.find(g => g.id === id)?.name, hours: +v('sumh').value })
+  loadSum()
+}
+
+function loadSched() {
+  v('sched').innerHTML = `<label>Send to</label><select id="sg"><option value="">A phone number...</option>${groupOpts()}</select>
+  <input type="text" id="sn" placeholder="Number, e.g. 2348012345678 (if not a group)">
+  <label>Message</label><textarea id="stx" rows="2"></textarea>
+  <label>When</label><input type="datetime-local" id="sat">
+  <label>Repeat</label><select id="srp"><option value="none">Once</option><option value="daily">Daily</option><option value="weekly">Weekly</option></select>
+  <button onclick="addSched()">Schedule</button><div id="slist"></div>`
+  listSched()
+}
+async function addSched() {
+  const g = v('sg').value, target = g || v('sn').value.replace(/\D/g, ''), when = v('sat').value
+  if (!target || !v('stx').value || !when) return alert('Fill in who, message and time')
+  await db.from('scheduled').insert({ target, target_name: g ? G.find(x => x.id === g)?.name : target, text: v('stx').value, send_at: new Date(when).toISOString(), repeat: v('srp').value })
+  v('stx').value = ''; listSched()
+}
+async function listSched() {
+  const { data } = await db.from('scheduled').select('*').order('send_at', { ascending: false }).limit(30)
+  v('slist').innerHTML = (data || []).map(s => `<div class="ev"><b>${esc(s.status)}</b> to ${esc(s.target_name)} · ${new Date(s.send_at).toLocaleString()} · ${esc(s.repeat)}<br>${esc(s.text)}<br><button onclick="delSched(${s.id})">Delete</button></div>`).join('')
+}
+async function delSched(id) { await db.from('scheduled').delete().eq('id', id); listSched() }
+
+async function loadStats() {
+  const [gs, ss, es] = await Promise.all([
+    db.from('group_stats_7d').select('*').order('n', { ascending: false }),
+    db.from('sender_stats_7d').select('*').order('n', { ascending: false }).limit(500),
+    db.from('event_stats_7d').select('*')])
+  const name = id => G.find(g => g.id === id)?.name || id
+  const rows = (gs.data || []).map(r => {
+    const top = (ss.data || []).filter(x => x.group_jid === r.group_jid).slice(0, 3).map(x => `${esc(x.sender)} (${x.n})`).join(', ')
+    return `<div class="ev"><b>${esc(name(r.group_jid))}</b>: ${r.n} messages<br><small>Most active: ${top}</small></div>`
+  }).join('')
+  const evs = (es.data || []).map(e => `${esc(e.type)}: ${e.n}`).join(' · ')
+  v('stats').innerHTML = `<small>Last 7 days, managed groups only</small>${rows || '<div class="ev">No data yet.</div>'}<div class="ev">${evs || 'No events yet.'}</div>`
+}
+init()
+</script></body></html>
