@@ -87,7 +87,8 @@ async function handleGroup(m, g) {
 }
 
 const history = new Map() // jid -> [{ role, parts, t }], conversation memory per contact
-const HISTORY_TURNS = 14, HISTORY_TTL = 24 * 3600e3, MAX_AI_PER_HOUR = 40
+const HISTORY_TURNS = 14, HISTORY_TTL = 24 * 3600e3
+const MAX_AI_PER_HOUR = +process.env.AI_MAX_PER_HOUR || 15, MAX_AI_PER_DAY = +process.env.AI_MAX_PER_DAY || 40 // per contact
 const aiCount = new Map()
 
 async function aiReply(parts, jid, voice = false) {
@@ -121,7 +122,7 @@ async function mediaParts(m) {
   if (!media) return []
   const size = media.fileLength?.toNumber?.() ?? Number(media.fileLength || 0)
   if (size > 15e6) return []
-  const buf = await downloadMediaMessage(m, 'buffer', {}, { logger: pino({ level: 'silent' }), reuploadRequest: sock.updateMediaMessage })
+  const buf = await downloadMediaMessage(m, 'buffer', {}, { logger: pino({ level: process.env.LOG_LEVEL || 'warn' }), reuploadRequest: sock.updateMediaMessage })
   const mime = (media.mimetype || (msg.audioMessage ? 'audio/ogg' : 'image/jpeg')).split(';')[0]
   return [{ inline_data: { mime_type: mime, data: buf.toString('base64') } }]
 }
@@ -175,8 +176,9 @@ async function handleDMNow(m) {
   // Plain away message: once per contact per 6h. AI chat mode: keeps replying to every message.
   if (!aiOn && Date.now() - (replied.get(jid) || 0) < 6 * 3600e3) return skip('6h limit (AI off) for ' + n)
   if (aiOn) { // loop / abuse guard: max AI replies per contact per hour
-    const c = (aiCount.get(jid) || []).filter(t => Date.now() - t < 3600e3)
-    if (c.length >= MAX_AI_PER_HOUR) return skip('hourly AI cap for ' + n)
+    const c = (aiCount.get(jid) || []).filter(t => Date.now() - t < 864e5)
+    if (c.length >= MAX_AI_PER_DAY) return skip('daily AI cap for ' + n)
+    if (c.filter(t => Date.now() - t < 3600e3).length >= MAX_AI_PER_HOUR) return skip('hourly AI cap for ' + n)
     c.push(Date.now()); aiCount.set(jid, c)
   }
 
@@ -184,7 +186,7 @@ async function handleDMNow(m) {
   let reply = null, userText = textOf(m)
   if (aiOn) {
     const parts = []
-    if (userText) parts.push({ text: userText })
+    if (userText) parts.push({ text: userText.slice(0, 800) })
     try {
       const media = await mediaParts(m)
       if (media.length) { parts.push(...media); userText = userText || '[sent a voice note or image]' }
@@ -213,7 +215,7 @@ async function start() {
   const { state, saveCreds } = process.env.AUTH_STORE === 'supabase' ? await useSupabaseAuthState(db) : await useMultiFileAuthState('auth')
   const { version } = await fetchLatestBaileysVersion().catch(() => ({}))
   const s = sock = makeWASocket({
-    ...(version && { version }), auth: state, logger: pino({ level: 'silent' }),
+    ...(version && { version }), auth: state, logger: pino({ level: process.env.LOG_LEVEL || 'warn' }),
     browser: Browsers.ubuntu('Chrome'), markOnlineOnConnect: false
   })
   s.ev.on('creds.update', saveCreds)
