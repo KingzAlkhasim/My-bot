@@ -42,8 +42,15 @@ async function syncGroups() {
   if (rows.length) await db.from('groups').upsert(rows, { onConflict: 'id' })
   await refresh()
 }
-let syncTimer
-const syncSoon = () => { clearTimeout(syncTimer); syncTimer = setTimeout(() => syncGroups().catch(() => {}), 3000) }
+let syncTimer, lastSync = 0
+// Never sync more than once a minute: a sync itself fires group events, which used to trigger another sync (loop).
+const syncSoon = () => {
+  clearTimeout(syncTimer)
+  syncTimer = setTimeout(() => {
+    if (Date.now() - lastSync < 60000) return
+    lastSync = Date.now(); syncGroups().catch(() => {})
+  }, 3000)
+}
 
 async function admins(jid) {
   const c = adminCache.get(jid)
@@ -209,7 +216,12 @@ async function handleDMNow(m) {
 }
 
 let pairAttempts = 0
-const MAX_PAIR_ATTEMPTS = 6 // stop hammering WhatsApp, repeated codes trigger the "too many attempts" block
+async function wipeAuth() {
+  await sleep(1500) // let any last credential write finish first
+  if (process.env.AUTH_STORE === 'supabase') await db.from('wa_auth').delete().neq('key', '')
+  else await (await import('fs')).promises.rm('auth', { recursive: true, force: true })
+}
+const MAX_PAIR_ATTEMPTS = 4 // stop hammering WhatsApp, repeated codes trigger the "too many attempts" block
 
 async function start() {
   const { state, saveCreds } = process.env.AUTH_STORE === 'supabase' ? await useSupabaseAuthState(db) : await useMultiFileAuthState('auth')
@@ -253,17 +265,16 @@ async function start() {
       console.log('Connection closed, status code:', code, String(lastDisconnect?.error?.message || ''))
       globalThis.botInfo.state = 'closed'; globalThis.botInfo.lastClose = code + ' @ ' + new Date().toISOString()
       setState('offline')
-      if (code === DisconnectReason.loggedOut) {
-        // 401 = WhatsApp rejected this login (removed device, or pairing raced with an expiring code).
-        // Clear the saved login and start a fresh pairing instead of leaving the bot dead.
-        console.log('Logged out / rejected (401). Clearing saved login and starting a fresh pairing.')
-        await sleep(1500) // let any last credential write finish first
-        if (process.env.AUTH_STORE === 'supabase') await db.from('wa_auth').delete().neq('key', '')
-        else await (await import('fs')).promises.rm('auth', { recursive: true, force: true })
+      // The pairing window ended without anyone entering the code (408), or WhatsApp rejected the half-made
+      // login (401). Wipe it so the next try starts clean, wait a bit (do not hammer WhatsApp), then ask again.
+      const pairingTimeout = code === DisconnectReason.timedOut && /QR refs/i.test(String(lastDisconnect?.error?.message || ''))
+      if (code === DisconnectReason.loggedOut || pairingTimeout) {
+        console.log(pairingTimeout ? 'Pairing window ended without a link. Starting clean.' : 'Logged out / rejected (401). Starting clean.')
+        await wipeAuth()
         if (!process.env.PAIR_NUMBER || pairAttempts >= MAX_PAIR_ATTEMPTS) {
-          globalThis.pairCode = 'paused: login cleared. Redeploy to link again.'; setState('pair_paused'); return
+          globalThis.pairCode = 'paused: too many pairing attempts. Wait 1-2 hours, then redeploy.'; setState('pair_paused'); return
         }
-        setTimeout(() => start().catch(e => console.error('restart failed', e)), 5000)
+        setTimeout(() => start().catch(e => console.error('restart failed', e)), pairingTimeout ? 30000 : 5000)
         return
       }
       // Still not linked and already tried several codes: pause instead of spamming WhatsApp.
@@ -310,8 +321,6 @@ async function start() {
     }
   })
 
-  s.ev.on('groups.upsert', syncSoon)
-  s.ev.on('groups.update', syncSoon)
   s.ev.on('group-participants.update', async ({ id, participants, action }) => {
     if (action === 'promote' || action === 'demote') { adminCache.delete(id); syncSoon() }
     const g = groups.get(id)
