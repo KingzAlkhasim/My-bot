@@ -254,8 +254,16 @@ async function start() {
       globalThis.botInfo.state = 'closed'; globalThis.botInfo.lastClose = code + ' @ ' + new Date().toISOString()
       setState('offline')
       if (code === DisconnectReason.loggedOut) {
-        console.log('Logged out. Clearing saved login, restart to link again.')
+        // 401 = WhatsApp rejected this login (removed device, or pairing raced with an expiring code).
+        // Clear the saved login and start a fresh pairing instead of leaving the bot dead.
+        console.log('Logged out / rejected (401). Clearing saved login and starting a fresh pairing.')
+        await sleep(1500) // let any last credential write finish first
         if (process.env.AUTH_STORE === 'supabase') await db.from('wa_auth').delete().neq('key', '')
+        else await (await import('fs')).promises.rm('auth', { recursive: true, force: true })
+        if (!process.env.PAIR_NUMBER || pairAttempts >= MAX_PAIR_ATTEMPTS) {
+          globalThis.pairCode = 'paused: login cleared. Redeploy to link again.'; setState('pair_paused'); return
+        }
+        setTimeout(() => start().catch(e => console.error('restart failed', e)), 5000)
         return
       }
       // Still not linked and already tried several codes: pause instead of spamming WhatsApp.
