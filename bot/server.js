@@ -1,4 +1,12 @@
 import express from 'express'
+// The Signal library prints whole session objects (including private keys) with console.info.
+// Drop those lines so secrets never land in the Render logs.
+const NOISY = /^(Closing session|Opening session|Removing old closed session|Migrating session|Session already)/
+for (const k of ['log', 'info', 'warn']) {
+  const orig = console[k].bind(console)
+  console[k] = (...a) => { if (typeof a[0] === 'string' && NOISY.test(a[0])) return; orig(...a) }
+}
+
 let botError = null
 const app = express()
 app.use(express.json())
