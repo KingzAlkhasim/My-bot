@@ -165,8 +165,10 @@ async function sendVoice(jid, text) {
 
 const dmChains = new Map() // one message at a time per contact, so quick messages do not overlap
 
+const contacted = new Map() // numbers that messaged the bot first: the bot never starts a chat with strangers
 function handleDM(m) {
   const jid = m.key.remoteJid
+  contacted.set(num(jid), Date.now())
   const next = (dmChains.get(jid) || Promise.resolve()).then(() => handleDMNow(m)).catch(e => event('error', null, String(e).slice(0, 300)))
   dmChains.set(jid, next)
   return next
@@ -294,9 +296,12 @@ async function start() {
       if (c.status !== 'offer') continue
       try {
         if (!settings.call_reply) continue
+        if (c.isGroup || c.groupJid) continue // group calls: do nothing, never message people from groups
         const n = num(c.from)
         if (list(settings.blacklist).includes(n)) continue
         await s.rejectCall(c.id, c.from)
+        // Only answer people who already messaged the bot in the last 7 days. Strangers get a silent reject.
+        if (Date.now() - (contacted.get(n) || 0) > 7 * 864e5) { await event('call_rejected', null, `Call from ${n} (no message sent: they never messaged first)`); continue }
         if (Date.now() - (calledAt.get(c.from) || 0) < 10 * 60e3) continue
         calledAt.set(c.from, Date.now())
         const msg = (settings.call_message || '').trim() || "Hi, I can't take calls right now, but you can send me a message or voice note here and I'll reply."
